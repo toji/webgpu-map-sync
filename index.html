@@ -1,0 +1,112 @@
+<!doctype html>
+
+<html>
+  <head>
+    <meta charset='utf-8'>
+
+    <title>WebGPU MapSync test</title>
+  </head>
+  <body>
+    <p>Look at the dev console for output.</p>
+    <script type="module">
+      import './map-sync.js';
+
+      const BUFFER_SIZE = 4096;
+
+      class TestApp {
+        async initWebGPU() {
+          this.adapter = await navigator.gpu.requestAdapter();
+          this.device = await this.adapter.requestDevice();
+
+          this.computeOutputBuffer = this.device.createBuffer({
+            size: BUFFER_SIZE,
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC
+          });
+
+          this.mapSyncBuffer = this.device.createBuffer({
+            size: BUFFER_SIZE,
+            usage: GPUBufferUsage.MAP_READ_SYNC | GPUBufferUsage.COPY_DST
+          });
+
+          this.mapAsyncBuffer = this.device.createBuffer({
+            size: BUFFER_SIZE,
+            usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST
+          });
+
+          this.computePipeline = this.device.createComputePipeline({
+            compute: {
+              module: this.device.createShaderModule({ code: `
+                struct OutputBuffer {
+                  entries: array<vec4<u32>>;
+                };
+                @group(0) @binding(0) var<storage, read_write> output : OutputBuffer;
+
+                @stage(compute) @workgroup_size(8, 8, 1)
+                fn computeMain(
+                  @builtin(global_invocation_id) global_id : vec3<u32>,
+                  @builtin(local_invocation_index) local_id : u32,
+                  @builtin(num_workgroups) num_workgroups : vec3<u32>) {
+                  let index = global_id.x + (global_id.y * (num_workgroups.x * 8u));
+                  output.entries[index] = vec4(global_id.xy, local_id, 0xffu);
+                }
+              `}),
+              entryPoint: 'computeMain',
+            }
+          });
+
+          this.computeBindGroup = this.device.createBindGroup({
+            layout: this.computePipeline.getBindGroupLayout(0),
+            entries: [{
+              binding: 0,
+              resource: {
+                buffer: this.computeOutputBuffer,
+              },
+            }],
+          });
+        }
+
+        fillBuffer() {
+          const commandEncoder = this.device.createCommandEncoder();
+
+          const passEncoder = commandEncoder.beginComputePass();
+          passEncoder.setPipeline(this.computePipeline);
+          passEncoder.setBindGroup(0, this.computeBindGroup);
+          passEncoder.dispatch(4);
+          passEncoder.end();
+
+          commandEncoder.copyBufferToBuffer(this.computeOutputBuffer, 0, this.mapSyncBuffer, 0, BUFFER_SIZE);
+          commandEncoder.copyBufferToBuffer(this.computeOutputBuffer, 0, this.mapAsyncBuffer, 0, BUFFER_SIZE);
+
+          this.device.queue.submit([commandEncoder.finish()]);
+        }
+
+        async readAsync() {
+          const startTime = performance.now();
+          await this.mapAsyncBuffer.mapAsync(GPUMapMode.READ);
+          const arrayBuffer = this.mapAsyncBuffer.getMappedRange(8, 256);
+          console.log('readAsync: ', new Uint32Array(arrayBuffer));
+          console.log('time: ', performance.now() - startTime);
+          this.mapAsyncBuffer.unmap();
+        }
+
+        readSync() {
+          const startTime = performance.now();
+          this.mapSyncBuffer.mapSync(GPUMapMode.READ);
+          const arrayBuffer = this.mapSyncBuffer.getMappedRange(8, 256);
+          console.log('readSync: ', new Uint32Array(arrayBuffer));
+          console.log('time: ', performance.now() - startTime);
+          this.mapSyncBuffer.unmap();
+        }
+      };
+
+      const testApp = new TestApp();
+      await testApp.initWebGPU();
+
+      testApp.fillBuffer();
+      await testApp.readAsync();
+
+      testApp.fillBuffer();
+      testApp.readSync();
+    </script>
+  </body>
+</html>
